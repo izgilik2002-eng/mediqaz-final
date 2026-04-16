@@ -117,7 +117,9 @@ async function transcribeWithDeepgram(audioBuffer) {
         if (word.speaker !== currentSpeaker) {
             currentSpeaker = word.speaker;
             if (formatted) formatted += "\n";
-            formatted += `[Спикер ${currentSpeaker}]: `;
+            // Склейка и замена ролей для понятного текста
+            const role = currentSpeaker === 0 ? 'Врач' : (currentSpeaker === 1 ? 'Пациент' : `Спикер ${currentSpeaker}`);
+            formatted += `${role}: `;
         }
         formatted += (word.punctuated_word || word.word) + " ";
     }
@@ -198,7 +200,7 @@ app.post('/api/magic-edit', authenticateToken, async (req, res) => {
         return res.status(400).json({ error: 'Нужна форма и инструкция' });
     }
 
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-pro' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
     const prompt = `Ты медицинский ассистент. У тебя есть заполненная медицинская форма (JSON) и голосовая инструкция врача.
 Задача: примени инструкцию врача к форме и верни обновлённый JSON.
 Не меняй поля, которые не затронуты инструкцией. Верни ТОЛЬКО валидный JSON.
@@ -303,7 +305,7 @@ wss.on('connection', (ws, req) => {
 
             // 2. Генерация JSON (Gemini 1.5 Flash)
             console.log('➡️  Отправка в Gemini 1.5 Flash...');
-            const model = genAI.getGenerativeModel({ model: 'gemini-2.5-pro' });
+            const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
             let prompt = SYSTEM_PROMPTS[sessionData.formType] || SYSTEM_PROMPTS['052'];
 
             // Загружаем кастомный промпт текущего врача
