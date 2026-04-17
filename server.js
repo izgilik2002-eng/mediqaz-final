@@ -6,7 +6,7 @@ const path = require('path');
 const axios = require('axios');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+const Groq = require('groq-sdk');
 const db = require('./database');
 
 const app = express();
@@ -18,7 +18,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // Инициализация API
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const JWT_SECRET = process.env.JWT_SECRET || 'mediqaz-fallback-secret';
 
 // JWT Middleware — защита маршрутов
@@ -36,9 +36,8 @@ function authenticateToken(req, res, next) {
     }
 }
 
-// Конфигурация для JSON ответа от Gemini
-const geminiJsonConfig = {
-    responseMimeType: "application/json",
+const groqJsonConfig = {
+    response_format: { type: "json_object" }
 };
 
 // Промпты для каждой формы
@@ -200,10 +199,9 @@ app.post('/api/magic-edit', authenticateToken, async (req, res) => {
         return res.status(400).json({ error: 'Нужна форма и инструкция' });
     }
 
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
     const prompt = `Ты медицинский ассистент. У тебя есть заполненная медицинская форма (JSON) и голосовая инструкция врача.
 Задача: примени инструкцию врача к форме и верни обновлённый JSON.
-Не меняй поля, которые не затронуты инструкцией. Верни ТОЛЬКО валидный JSON.
+Не меняй поля, которые не затронуты инструкцией.
 
 Текущая форма:
 ${JSON.stringify(currentForm, null, 2)}
@@ -212,14 +210,15 @@ ${JSON.stringify(currentForm, null, 2)}
 
 Верни обновлённый JSON.`;
 
-    let result = null;
+    let chatCompletion = null;
     let lastErr = null;
 
     for (let attempt = 0; attempt < 3; attempt++) {
         try {
-            result = await model.generateContent({
-                contents: [{ role: "user", parts: [{ text: prompt }] }],
-                generationConfig: geminiJsonConfig,
+            chatCompletion = await groq.chat.completions.create({
+                messages: [{ role: "user", content: prompt }],
+                model: "llama-3.3-70b-versatile",
+                response_format: { type: "json_object" }
             });
             break; // Успешно
         } catch (err) {
@@ -235,14 +234,14 @@ ${JSON.stringify(currentForm, null, 2)}
         }
     }
 
-    if (!result) {
-        console.error('Magic Edit ошибка API:', lastErr?.message);
+    if (!chatCompletion) {
+        console.error('Magic Edit ошибка API Groq:', lastErr?.message);
         return res.status(503).json({ error: 'Нейросеть сейчас перегружена. Попробуйте еще раз.' });
     }
 
     try {
-        const updatedForm = JSON.parse(result.response.text());
-        console.log('✨ Magic Edit успешно:', instruction.substring(0, 60));
+        const updatedForm = JSON.parse(chatCompletion.choices[0].message.content);
+        console.log('✨ Magic Edit успешно (Groq):', instruction.substring(0, 60));
         res.json({ updatedForm });
     } catch (err) {
         console.error('Magic Edit ошибка парсинга:', err.message);
@@ -303,50 +302,53 @@ wss.on('connection', (ws, req) => {
                 console.log('✅ Текст отправлен на фронтенд');
             }
 
-            // 2. Генерация JSON (Gemini 1.5 Flash)
-            console.log('➡️  Отправка в Gemini 1.5 Flash...');
-            const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-            let prompt = SYSTEM_PROMPTS[sessionData.formType] || SYSTEM_PROMPTS['052'];
+            // 2. Генерация JSON (Groq Llama 3.3)
+            console.log('➡️  Отправка в Groq (llama-3.3-70b)...');
+            let systemPrompt = SYSTEM_PROMPTS[sessionData.formType] || SYSTEM_PROMPTS['052'];
 
             // Загружаем кастомный промпт текущего врача
             const userData = db.getUserById(wsUserId);
             if (userData && userData.custom_prompt && userData.custom_prompt.trim()) {
-                prompt += `\n\n=== ПРАВИЛА И ПРИВЫЧКИ ВРАЧА (ВЫСШИЙ ПРИОРИТЕТ) ===\n${userData.custom_prompt}\n`;
+                systemPrompt += `\n\n=== ПРАВИЛА И ПРИВЫЧКИ ВРАЧА (ВЫСШИЙ ПРИОРИТЕТ) ===\n${userData.custom_prompt}\n`;
             }
 
-            const userPrompt = `Транскрипция:\n"${fullTextAccumulated}"\n\nЗаполни форму. Верни ТОЛЬКО JSON без markdown.`;
+            const userPrompt = `Транскрипция:\n"${fullTextAccumulated}"\n\nЗаполни форму.`;
 
-            let geminiResult = null;
+            let groqResult = null;
             for (let attempt = 0; attempt < 3; attempt++) {
                 try {
-                    geminiResult = await model.generateContent({
-                        contents: [{ role: "user", parts: [{ text: prompt + "\n\n" + userPrompt }] }],
-                        generationConfig: geminiJsonConfig,
+                    groqResult = await groq.chat.completions.create({
+                        messages: [
+                            { role: "system", content: systemPrompt },
+                            { role: "user", content: userPrompt }
+                        ],
+                        model: "llama-3.3-70b-versatile",
+                        response_format: { type: "json_object" }
                     });
                     break;
-                } catch (geminiErr) {
-                    const statusCode = geminiErr.status || geminiErr.httpStatusCode || 0;
-                    console.log(`❌ Gemini ошибка ${statusCode}: ${geminiErr.message}`);
+                } catch (groqErr) {
+                    const statusCode = groqErr.status || 0;
+                    console.log(`❌ Groq ошибка ${statusCode}: ${groqErr.message}`);
                     if ((statusCode === 429 || statusCode === 503) && attempt < 2) {
-                        console.log(`⏳ Ждём 10 секунд и повторяем (попытка ${attempt + 2}/3)...`);
-                        await new Promise(r => setTimeout(r, 10000));
+                        console.log(`⏳ Ждём 5 секунд и повторяем (попытка ${attempt + 2}/3)...`);
+                        await new Promise(r => setTimeout(r, 5000));
                     } else {
-                        throw geminiErr;
+                        throw groqErr;
                     }
                 }
             }
 
-            if (geminiResult) {
-                const jsonResponseText = geminiResult.response.text();
-                console.log('📄 Ответ Gemini (сырой):', jsonResponseText.substring(0, 200));
+            if (groqResult) {
+                const jsonResponseText = groqResult.choices[0].message.content;
+                console.log('📄 Ответ Groq (сырой):', jsonResponseText.substring(0, 200));
                 try {
                     const parsedData = JSON.parse(jsonResponseText);
                     if (ws.readyState === WebSocket.OPEN) {
                         ws.send(JSON.stringify({ type: 'form_update', formJson: parsedData }));
                     }
-                    console.log('✅ Форма успешно обновлена от Gemini!');
+                    console.log('✅ Форма успешно обновлена от Groq!');
                 } catch (jsonErr) {
-                    console.error('❌ Ошибка парсинга JSON от Gemini:', jsonResponseText.substring(0, 300));
+                    console.error('❌ Ошибка парсинга JSON от Groq:', jsonResponseText.substring(0, 300));
                 }
             }
 
