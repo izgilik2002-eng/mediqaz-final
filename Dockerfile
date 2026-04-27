@@ -19,12 +19,11 @@ RUN npm ci --omit=dev
 # Копируем исходный код
 COPY . .
 
-# Создаём non-root пользователя для безопасности
-RUN useradd -m -u 1001 mediqaz && chown -R mediqaz:mediqaz /app
-USER mediqaz
+# Создаём папку для БД и даем права (на случай если используется DB_PATH=/app/data/...)
+RUN mkdir -p /app/data && chmod 777 /app/data
 
 # Открываем порт HTTP сервера
 EXPOSE 3000
 
-# Запускаем приложение
+# Запускаем приложение (пока от root, чтобы не было конфликтов с правами на существующую БД)
 CMD ["npm", "start"]
