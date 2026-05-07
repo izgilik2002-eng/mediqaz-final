@@ -188,13 +188,15 @@ async function handleFillForm(payload) {
   // Ждём загрузки скрипта
   await new Promise(r => setTimeout(r, 400));
 
-  // Отправляем медкарту для заполнения
-  const medCard = payload.medCard || payload;
+  // Отправляем медкарту и duration для заполнения
+  const medCard  = payload.medCard || payload;
+  const duration = payload.duration || null;
 
   try {
     const result = await chrome.tabs.sendMessage(activeTab.id, {
       type: 'FILL_FORM_DATA',
       medCard,
+      duration,
     });
     return result;
   } catch (sendErr) {

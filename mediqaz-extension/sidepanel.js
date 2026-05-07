@@ -837,9 +837,15 @@ btnFillMIS.addEventListener('click', async () => {
   showToast('Инъектирую скрипт в МИС...', 'info', 3000);
 
   try {
+    // Рассчитываем продолжительность приёма (минимум 1 минута, округление вверх)
+    const durationMinutes = Math.max(1, Math.ceil(state.timerSeconds / 60));
+
     const response = await chrome.runtime.sendMessage({
       type: 'FILL_FORM',
-      payload: { medCard: state.medCard },
+      payload: {
+        medCard: state.medCard,
+        duration: durationMinutes,
+      },
     });
 
     if (response?.success && response.data?.data) {
@@ -1045,6 +1051,10 @@ ${customInstructions ? `ПЕРСОНАЛЬНЫЕ ИНСТРУКЦИИ ВРАЧА
 ${state.voiceCommands.length > 0 ? `ГОЛОСОВЫЕ КОМАНДЫ ВРАЧА (ПРИОРИТЕТ ВЫШЕ ИНСТРУКЦИЙ):\n${state.voiceCommands.map(c => `- ${c}`).join('\n')}\n` : ''}
 ПРАВИЛА:
 1. Извлекай информацию ТОЛЬКО из транскрипции. НИКОГДА не придумывай данные.
+1.5. ОПРЕДЕЛИ ТИП ПРИЕМА: проанализируй контекст диалога.
+     - Если есть явное упоминание что это первый визит (слова: "впервые", "первый раз", "никогда не был", "алғаш рет келмеді") — верни "Первичный".
+     - Если есть явное упоминание что бывал раньше (слова: "повторно", "опять пришёл", "в прошлый раз", "не первый раз", пациент упоминает предыдущие визиты / анализы / назначения) — верни "Повторный".
+     - Если в диалоге НЕТ явных упоминаний о том первый это визит или нет — верни null (не угадывай!).
 2. Если данных для секции нет — напиши точно: "Не указано в ходе приёма".
 3. Для каждой секции укажи ТОЧНУЮ цитату из транскрипции (поле "цитата") — дословно.
 4. Диагноз: обязательно укажи код МКБ-10.
@@ -1053,7 +1063,7 @@ ${state.voiceCommands.length > 0 ? `ГОЛОСОВЫЕ КОМАНДЫ ВРАЧА
 7. Верни ТОЛЬКО JSON, без пояснений и markdown.`;
 
   // ── User промпт ────────────────────────────────────────────
-  const userPrompt = `ТРАНСКРИПЦИЯ ПРИЁМА:\n${state.fullTranscript}\n\nВерни строго JSON:\n{\n  "жалобы":          { "текст": "...", "цитата": "точные слова из транскрипции" },\n  "анамнез":         { "текст": "...", "цитата": "..." },\n  "объективно":      { "текст": "...", "цитата": "..." },\n  "диагноз":         { "текст": "...", "мкб10": "код", "цитата": "..." },\n  "назначения":      { "текст": "...", "цитата": "..." },\n  "рекомендации":    { "текст": "...", "цитата": "..." },\n  "следующий_прием": { "текст": "...", "цитата": "..." }\n}`;
+  const userPrompt = `ТРАНСКРИПЦИЯ ПРИЁМА:\n${state.fullTranscript}\n\nВерни строго JSON:\n{\n  "тип_приема":       "Первичный или Повторный",\n  "жалобы":          { "текст": "...", "цитата": "точные слова из транскрипции" },\n  "анамнез":         { "текст": "...", "цитата": "..." },\n  "объективно":      { "текст": "...", "цитата": "..." },\n  "диагноз":         { "текст": "...", "мкб10": "код", "цитата": "..." },\n  "назначения":      { "текст": "...", "цитата": "..." },\n  "рекомендации":    { "текст": "...", "цитата": "..." },\n  "следующий_прием": { "текст": "...", "цитата": "..." }\n}`;
 
   try {
     const raw = await callGroq([
@@ -1389,14 +1399,14 @@ function exportMedCardPDF() {
     doc.rect(0, 0, pageW, 18, 'F');
     doc.setTextColor(255, 255, 255);
     doc.setFontSize(14);
-    doc.setFont('helvetica', 'bold');
+    doc.setFont('PTSans', 'normal');
     doc.text('MediQaz — Медицинская Карта', pageW / 2, 11, { align: 'center' });
     y = 26;
 
     // ─ МЕТАДАННЫЕ ─────────────────────────────────────────────
     doc.setTextColor(80, 80, 80);
     doc.setFontSize(9);
-    doc.setFont('helvetica', 'normal');
+    doc.setFont('PTSans', 'normal');
     const doctorVal = doctorName.value || 'Не указан';
     const patientVal = patientName.value || 'Не указан';
     const specialty = SPECIALTY_NAMES[state.settings.specialty] || 'Терапевт';
@@ -1427,14 +1437,14 @@ function exportMedCardPDF() {
       doc.roundedRect(marginL - 2, y - 4, textW + 4, 8, 1, 1, 'F');
       doc.setTextColor(37, 99, 235);
       doc.setFontSize(10);
-      doc.setFont('helvetica', 'bold');
+      doc.setFont('PTSans', 'normal');
       doc.text(`${def.icon} ${def.title}`, marginL, y + 1);
 
       // МКБ-10 если есть
       if (section?.мкб10) {
         doc.setTextColor(100, 100, 100);
         doc.setFontSize(8);
-        doc.setFont('helvetica', 'normal');
+        doc.setFont('PTSans', 'normal');
         doc.text(`[МКБ-10: ${section.мкб_10 || section.мкк10 || section.мкб10}]`,
           pageW - marginR, y + 1, { align: 'right' });
       }
@@ -1444,7 +1454,7 @@ function exportMedCardPDF() {
       // Текст секции (с переносом по словам)
       doc.setTextColor(30, 30, 30);
       doc.setFontSize(9);
-      doc.setFont('helvetica', 'normal');
+      doc.setFont('PTSans', 'normal');
 
       const lines = doc.splitTextToSize(text, textW);
       for (const line of lines) {
@@ -1462,7 +1472,7 @@ function exportMedCardPDF() {
       doc.setPage(i);
       doc.setTextColor(160, 160, 160);
       doc.setFontSize(8);
-      doc.setFont('helvetica', 'normal');
+      doc.setFont('PTSans', 'normal');
       doc.text(
         `MediQaz — генерация AI  |  Стр. ${i} из ${pageCount}`,
         pageW / 2, pageH - 7,

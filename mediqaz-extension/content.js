@@ -1,5 +1,6 @@
 // ============================================================
-// content.js — MediQaz Автозаполнитель форм МИС v1.0
+// content.js — MediQaz Автозаполнитель форм 1С МИС v2.1
+// Снайперский точечный ввод: Прием + Продолжительность + Содержание
 // Инжектируется динамически через background.js
 // ============================================================
 
@@ -9,354 +10,300 @@ if (window.__mediqazContentLoaded) {
 } else {
   window.__mediqazContentLoaded = true;
 
-// ─── Секции медкарты → русские названия полей ───────────────
-const SECTION_LABELS = {
-  'жалобы':          ['жалобы', 'complaints', 'complaint', 'жалоба'],
-  'анамнез':         ['анамнез', 'anamnesis', 'history', 'анамнез заболевания', 'анамнез жизни', 'epid_anamnez'],
-  'объективно':      ['объективно', 'objective', 'осмотр', 'status', 'физикальный', 'объективный статус', 'status praesens'],
-  'диагноз':         ['диагноз', 'diagnosis', 'ds', 'заключение', 'основной диагноз', 'клинический диагноз'],
-  'назначения':      ['назначения', 'treatment', 'лечение', 'терапия', 'prescription', 'рецепт'],
-  'рекомендации':    ['рекомендации', 'recommendations', 'рекомендация', 'план', 'advice'],
-  'следующий_прием': ['следующий приём', 'next visit', 'повторный', 'follow up', 'контроль'],
-};
-
 // ─── Слушаем сообщения от background.js ─────────────────────
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'FILL_FORM_DATA') {
-    fillMISForm(message.medCard)
+    fillMISForm(message.medCard, message.duration)
       .then(result => sendResponse({ success: true, data: result }))
       .catch(err  => sendResponse({ success: false, error: err.message }));
-    return true; // асинхронный ответ
+    return true;
   }
 });
 
 // ════════════════════════════════════════════════════════════
-// СКАНИРОВАНИЕ DOM — сбор видимых полей
+// ПОИСК ПОЛЕЙ ПО ЛЕЙБЛУ
 // ════════════════════════════════════════════════════════════
 
-/**
- * scanFormFields() — собирает все заполняемые поля на странице.
- * @returns {{ id, tagName, type, name, label, placeholder, ariaLabel, nearbyText, isContentEditable }[]}
- */
-function scanFormFields() {
-  const fields = [];
-  const selectors = [
-    'input[type="text"]',
-    'input:not([type])',
-    'textarea',
-    '[contenteditable="true"]',
-    '[contenteditable=""]',
-    'input[type="search"]',
-  ];
-
-  const elements = document.querySelectorAll(selectors.join(', '));
-
-  elements.forEach((el, idx) => {
-    // Пропускаем скрытые, disabled, readonly
-    if (el.offsetParent === null && !el.closest('[contenteditable]')) return;
-    if (el.disabled || el.readOnly) return;
-    if (el.type === 'hidden') return;
-
-    // Размер меньше 20px — вероятно не поле формы
-    const rect = el.getBoundingClientRect();
-    if (rect.width < 20 || rect.height < 10) return;
-
-    const fieldInfo = {
-      idx,
-      tagName: el.tagName.toLowerCase(),
-      type:    el.type || '',
-      id:      el.id || '',
-      name:    el.name || '',
-      label:   findLabel(el) || '',
-      placeholder: el.placeholder || '',
-      ariaLabel:   el.getAttribute('aria-label') || '',
-      nearbyText:  getNearbyText(el),
-      isContentEditable: el.isContentEditable,
-    };
-
-    // Генерируем уникальный CSS-селектор
-    fieldInfo.selector = generateSelector(el);
-
-    fields.push(fieldInfo);
-  });
-
-  console.log(`[MediQaz] Сканирование DOM: найдено ${fields.length} полей`);
-  return fields;
+function normalizeLabel(text) {
+  return text.trim().toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ');
 }
 
 /**
- * findLabel() — ищет label для поля по for, aria-labelledby, или parent label.
+ * findInputByExactLabel(labelText) — находит поле ввода по соседнему текстовому лейблу.
+ * Заточен под веб-клиент 1С:Предприятие.
  */
-function findLabel(el) {
-  // 1. Ищем <label for="...">
-  if (el.id) {
-    const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
-    if (label) return label.textContent.trim().slice(0, 100);
-  }
+function findInputByExactLabel(labelText) {
+  const normalTarget = normalizeLabel(labelText);
+  const candidates = document.querySelectorAll('span, div, td, label, th, p');
 
-  // 2. aria-labelledby
-  const ariaBy = el.getAttribute('aria-labelledby');
-  if (ariaBy) {
-    const labelEl = document.getElementById(ariaBy);
-    if (labelEl) return labelEl.textContent.trim().slice(0, 100);
-  }
+  for (const candidate of candidates) {
+    const directText = Array.from(candidate.childNodes)
+      .filter(n => n.nodeType === Node.TEXT_NODE)
+      .map(n => n.textContent)
+      .join('');
 
-  // 3. Родительский <label>
-  const parentLabel = el.closest('label');
-  if (parentLabel) return parentLabel.textContent.trim().slice(0, 100);
+    if (normalizeLabel(directText) !== normalTarget) continue;
 
-  return '';
-}
+    const inputSelector = 'input:not([type="hidden"]):not([disabled]):not([readonly]), select:not([disabled])';
 
-/**
- * getNearbyText() — берёт текст ближайших элементов (label, span, div до 200px).
- */
-function getNearbyText(el) {
-  const texts = [];
-
-  // Предыдущий sibling
-  let prev = el.previousElementSibling;
-  if (prev) texts.push(prev.textContent.trim().slice(0, 80));
-
-  // Родитель
-  const parent = el.parentElement;
-  if (parent) {
-    // Все text nodes внутри родителя
-    for (const child of parent.childNodes) {
-      if (child.nodeType === Node.TEXT_NODE) {
-        const t = child.textContent.trim();
-        if (t) texts.push(t.slice(0, 80));
-      }
+    // a) nextElementSibling
+    let sibling = candidate.nextElementSibling;
+    while (sibling) {
+      if (sibling.matches(inputSelector) && isVisible(sibling)) return sibling;
+      const inner = sibling.querySelector(inputSelector);
+      if (inner && isVisible(inner)) return inner;
+      sibling = sibling.nextElementSibling;
     }
-  }
 
-  return texts.filter(Boolean).join(' | ').slice(0, 200);
-}
-
-/**
- * generateSelector() — создаёт уникальный CSS-селектор для элемента.
- */
-function generateSelector(el) {
-  if (el.id) return `#${CSS.escape(el.id)}`;
-  if (el.name) return `${el.tagName.toLowerCase()}[name="${CSS.escape(el.name)}"]`;
-
-  // Если нет id/name — строим путь
-  const path = [];
-  let current = el;
-  while (current && current !== document.body) {
-    let selector = current.tagName.toLowerCase();
-    if (current.id) {
-      selector = `#${CSS.escape(current.id)}`;
-      path.unshift(selector);
-      break;
-    }
-    const parent = current.parentElement;
+    // b) parentElement
+    const parent = candidate.parentElement;
     if (parent) {
-      const siblings = Array.from(parent.children).filter(c => c.tagName === current.tagName);
-      if (siblings.length > 1) {
-        const idx = siblings.indexOf(current) + 1;
-        selector += `:nth-of-type(${idx})`;
-      }
+      const inParent = parent.querySelector(inputSelector);
+      if (inParent && inParent !== candidate && isVisible(inParent)) return inParent;
     }
-    path.unshift(selector);
-    current = current.parentElement;
+
+    // c) closest('tr') — табличная разметка 1С
+    const row = candidate.closest('tr');
+    if (row) {
+      const inRow = row.querySelector(inputSelector);
+      if (inRow && isVisible(inRow)) return inRow;
+    }
+
+    // d) closest('div[class]') — div-контейнер 1С
+    const container = candidate.closest('div[class]');
+    if (container) {
+      const inContainer = container.querySelector(inputSelector);
+      if (inContainer && inContainer !== candidate && isVisible(inContainer)) return inContainer;
+    }
   }
-  return path.join(' > ');
+
+  return null;
+}
+
+function isVisible(el) {
+  if (!el) return false;
+  const rect = el.getBoundingClientRect();
+  if (rect.width < 5 || rect.height < 5) return false;
+  if (el.type === 'hidden') return false;
+  if (el.disabled || el.readOnly) return false;
+  return true;
 }
 
 // ════════════════════════════════════════════════════════════
-// AI МАППИНГ — Groq определяет какое поле = какая секция
+// ПОИСК БОЛЬШОГО РЕДАКТОРА ДЛЯ "СОДЕРЖАНИЕ"
+// ════════════════════════════════════════════════════════════
+
+function findLargestEditor() {
+  const candidates = [];
+
+  document.querySelectorAll('iframe').forEach(iframe => {
+    const rect = iframe.getBoundingClientRect();
+    const area = rect.width * rect.height;
+    if (area > 10000) {
+      candidates.push({ el: iframe, type: 'iframe', area });
+    }
+  });
+
+  document.querySelectorAll('textarea:not([disabled]):not([readonly])').forEach(ta => {
+    const rect = ta.getBoundingClientRect();
+    const area = rect.width * rect.height;
+    if (area > 10000 && isVisible(ta)) {
+      candidates.push({ el: ta, type: 'textarea', area });
+    }
+  });
+
+  document.querySelectorAll('[contenteditable="true"]').forEach(ce => {
+    const rect = ce.getBoundingClientRect();
+    const area = rect.width * rect.height;
+    if (area > 10000 && ce.offsetParent !== null) {
+      candidates.push({ el: ce, type: 'contenteditable', area });
+    }
+  });
+
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.area - a.area);
+  return candidates[0];
+}
+
+// ════════════════════════════════════════════════════════════
+// ЗАПОЛНЕНИЕ 1С COMBO BOX (Прием: Первичный/Повторный)
 // ════════════════════════════════════════════════════════════
 
 /**
- * getFieldMapping() — запрашивает у Groq AI маппинг полей к секциям медкарты.
- * С кэшированием (30 дней по hostname).
+ * fill1CComboBox(inputEl, value) — специально для кастомных дропдаунов 1С.
+ *
+ * Алгоритм:
+ * 1. Вставляем текст в инпут и генерируем события → 1С раскрывает выпадающий список
+ * 2. Ждём 400мс пока появятся опции
+ * 3. Ищем в DOM элемент с нужным текстом (div/li/span с текстом "Первичный" или "Повторный")
+ * 4. Кликаем на него → 1С подтверждает выбор
+ * 5. Fallback: если опция не нашлась — просто оставляем вставленный текст
  */
-async function getFieldMapping(fields, medCardKeys) {
-  const hostname = window.location.hostname;
-  const cacheKey = `domMapping_${hostname}`;
-
-  // Проверяем кэш
+async function fill1CComboBox(inputEl, value) {
   try {
-    const cached = await chrome.storage.local.get([cacheKey]);
-    if (cached[cacheKey]) {
-      const { mapping, timestamp } = cached[cacheKey];
-      const daysSince = (Date.now() - timestamp) / (1000 * 60 * 60 * 24);
-      if (daysSince < 30 && mapping) {
-        console.log(`[MediQaz] Используем кэшированный маппинг для ${hostname} (${daysSince.toFixed(1)} дней)`);
-        return mapping;
-      }
-    }
-  } catch (e) {
-    console.warn('[MediQaz] Ошибка чтения кэша:', e);
-  }
+    inputEl.focus();
+    inputEl.dispatchEvent(new Event('focus', { bubbles: true }));
 
-  // Готовим описание полей для AI
-  const fieldDescriptions = fields.map((f, i) =>
-    `[${i}] ${f.tagName}${f.type ? `[${f.type}]` : ''} | id="${f.id}" | name="${f.name}" | label="${f.label}" | placeholder="${f.placeholder}" | nearby="${f.nearbyText}"`
-  ).join('\n');
-
-  const medSections = medCardKeys.join(', ');
-
-  // Запрос к Groq через background.js
-  const response = await chrome.runtime.sendMessage({
-    type: 'GROQ_REQUEST',
-    payload: {
-      apiKey: null, // background.js возьмёт из storage
-      messages: [
-        {
-          role: 'system',
-          content: `Ты — AI, который маппит HTML-поля формы медицинской информационной системы (МИС) к секциям медкарты.
-Тебе дан список полей и список секций. Определи, какое поле соответствует какой секции.
-Верни ТОЛЬКО JSON объект вида: { "0": "жалобы", "3": "диагноз", ... }
-Где ключ — индекс поля, значение — название секции.
-Если поле не соответствует ни одной секции — пропусти его.
-НЕ ПРИДУМЫВАЙ маппинги если не уверен. Лучше пропустить чем ошибиться.`,
-        },
-        {
-          role: 'user',
-          content: `Секции медкарты: ${medSections}\n\nПоля формы:\n${fieldDescriptions}`,
-        },
-      ],
-      temperature: 0.1,
-      responseFormat: 'json',
-    },
-  });
-
-  if (!response.success) {
-    // Если AI не помогла — пробуем эвристику
-    console.warn('[MediQaz] AI маппинг не удался, используем эвристику:', response.error);
-    return heuristicMapping(fields, medCardKeys);
-  }
-
-  let mapping;
-  try {
-    mapping = JSON.parse(response.data);
-  } catch {
-    const match = response.data.match(/\{[\s\S]*\}/);
-    if (match) {
-      try { mapping = JSON.parse(match[0]); }
-      catch { return heuristicMapping(fields, medCardKeys); }
+    // Вставляем значение через нативный сеттер (обход 1С-хуков)
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype, 'value'
+    )?.set;
+    if (nativeSetter) {
+      nativeSetter.call(inputEl, value);
     } else {
-      return heuristicMapping(fields, medCardKeys);
-    }
-  }
-
-  // Сохраняем в кэш
-  try {
-    await chrome.storage.local.set({
-      [cacheKey]: { mapping, timestamp: Date.now() },
-    });
-    console.log(`[MediQaz] Маппинг сохранён в кэш для ${hostname}`);
-  } catch (e) {
-    console.warn('[MediQaz] Ошибка сохранения кэша:', e);
-  }
-
-  return mapping;
-}
-
-/**
- * heuristicMapping() — fallback маппинг по ключевым словам (без AI).
- */
-function heuristicMapping(fields, medCardKeys) {
-  const mapping = {};
-
-  fields.forEach((field, idx) => {
-    const searchText = [
-      field.label, field.name, field.id, field.placeholder, field.ariaLabel, field.nearbyText,
-    ].join(' ').toLowerCase();
-
-    for (const key of medCardKeys) {
-      const keywords = SECTION_LABELS[key] || [key];
-      const found = keywords.some(kw => searchText.includes(kw.toLowerCase()));
-      if (found) {
-        mapping[String(idx)] = key;
-        break;
-      }
-    }
-  });
-
-  console.log('[MediQaz] Эвристический маппинг:', mapping);
-  return mapping;
-}
-
-// ════════════════════════════════════════════════════════════
-// ЗАПОЛНЕНИЕ ПОЛЕЙ
-// ════════════════════════════════════════════════════════════
-
-/**
- * hasReactInternalProps() — детектирует React-компоненты.
- */
-function hasReactInternalProps(el) {
-  return Object.keys(el).some(k =>
-    k.startsWith('__reactInternalInstance') ||
-    k.startsWith('__reactFiber') ||
-    k.startsWith('__reactProps')
-  );
-}
-
-/**
- * setFieldValue() — устанавливает значение поля с учётом React/contentEditable.
- * @returns {boolean} — удалось ли записать значение
- */
-function setFieldValue(el, value) {
-  try {
-    if (el.isContentEditable) {
-      // contentEditable — вставляем через innerHTML
-      el.focus();
-      el.innerHTML = '';
-      el.textContent = value;
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      el.blur();
-      return true;
+      inputEl.value = value;
     }
 
-    if (hasReactInternalProps(el)) {
-      // React-компоненты требуют особого подхода
-      const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-        window.HTMLInputElement.prototype, 'value'
-      )?.set || Object.getOwnPropertyDescriptor(
-        window.HTMLTextAreaElement.prototype, 'value'
-      )?.set;
+    // Генерируем события чтобы 1С увидел изменение и раскрыл список
+    inputEl.dispatchEvent(new Event('keydown',  { bubbles: true }));
+    inputEl.dispatchEvent(new Event('input',    { bubbles: true }));
+    inputEl.dispatchEvent(new Event('change',   { bubbles: true }));
 
-      if (nativeInputValueSetter) {
-        nativeInputValueSetter.call(el, value);
-      } else {
-        el.value = value;
-      }
+    // Ждём пока 1С раскроет выпадающий список
+    await delay(450);
 
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
+    // Ищем опцию в выпадающем списке по тексту
+    const clicked = tryClickDropdownOption(value);
 
-      // Также пробуем React-совместимый event
-      const reactEvent = new Event('input', { bubbles: true });
-      Object.defineProperty(reactEvent, 'target', { writable: false, value: el });
-      el.dispatchEvent(reactEvent);
-
-      return true;
+    if (clicked) {
+      console.log(`[MediQaz] ✅ Клик по опции дропдауна: "${value}"`);
+    } else {
+      // Fallback: дропдаун не нашёлся — нажимаем Enter чтобы подтвердить введённый текст
+      console.log(`[MediQaz] ℹ️ Опция дропдауна не найдена, подтверждаем Enter`);
+      inputEl.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
+        bubbles: true, cancelable: true,
+      }));
     }
 
-    // Обычные поля
-    el.focus();
-    el.value = value;
-    el.dispatchEvent(new Event('input',  { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-    el.blur();
+    inputEl.blur();
+    inputEl.dispatchEvent(new Event('blur', { bubbles: true }));
+
     return true;
-
   } catch (err) {
-    console.error(`[MediQaz] Ошибка заполнения поля:`, err, el);
+    console.error('[MediQaz] Ошибка fill1CComboBox:', err);
     return false;
   }
 }
 
 /**
- * highlightField() — подсвечивает заполненное поле зелёным на 2 сек.
+ * tryClickDropdownOption(value) — ищет и кликает по нужному пункту выпадающего 1С-списка.
+ * 1С рендерит список опций как отдельные div/span/li с текстом, часто вне основного дерева.
+ * @returns {boolean} — нашёл и кликнул ли
  */
+function tryClickDropdownOption(value) {
+  const normalValue = value.toLowerCase().trim();
+
+  // 1С рендерит опции как элементы в popup/overlay контейнерах
+  const optionCandidates = document.querySelectorAll(
+    'div[class*="dropdown"] *, div[class*="popup"] *, div[class*="list"] *, ' +
+    'div[class*="menu"] *, li, [role="option"], [role="listitem"]'
+  );
+
+  for (const el of optionCandidates) {
+    const text = el.textContent?.trim().toLowerCase();
+    if (text === normalValue) {
+      el.click();
+      el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      el.dispatchEvent(new MouseEvent('mouseup',   { bubbles: true }));
+      return true;
+    }
+  }
+
+  // Второй проход — более широкий поиск: любой видимый элемент с точным текстом
+  const allElements = document.querySelectorAll('div, span, li, td');
+  for (const el of allElements) {
+    if (!isVisible(el)) continue;
+    const direct = Array.from(el.childNodes)
+      .filter(n => n.nodeType === Node.TEXT_NODE)
+      .map(n => n.textContent.trim().toLowerCase())
+      .join('');
+    if (direct === normalValue) {
+      el.click();
+      el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      el.dispatchEvent(new MouseEvent('mouseup',   { bubbles: true }));
+      return true;
+    }
+  }
+
+  return false;
+}
+
+// ════════════════════════════════════════════════════════════
+// УСТАНОВКА ЗНАЧЕНИЙ В 1С — эмуляция событий
+// ════════════════════════════════════════════════════════════
+
+function set1CValue(element, value) {
+  try {
+    element.focus();
+    element.dispatchEvent(new Event('focus', { bubbles: true }));
+
+    if (element.tagName === 'IFRAME') {
+      const doc = element.contentDocument || element.contentWindow?.document;
+      if (!doc) return false;
+      const body = doc.body;
+      if (!body) return false;
+      body.focus();
+      body.innerHTML = value.replace(/\n/g, '<br>');
+      body.dispatchEvent(new Event('input',  { bubbles: true }));
+      body.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    }
+
+    if (element.isContentEditable) {
+      element.innerHTML = '';
+      element.innerHTML = value.replace(/\n/g, '<br>');
+      element.dispatchEvent(new Event('keydown', { bubbles: true }));
+      element.dispatchEvent(new Event('input',   { bubbles: true }));
+      element.dispatchEvent(new Event('change',  { bubbles: true }));
+      element.blur();
+      return true;
+    }
+
+    const nativeInputSetter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype, 'value'
+    )?.set;
+    const nativeTextareaSetter = Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype, 'value'
+    )?.set;
+
+    if (element.tagName === 'TEXTAREA' && nativeTextareaSetter) {
+      nativeTextareaSetter.call(element, value);
+    } else if (element.tagName === 'INPUT' && nativeInputSetter) {
+      nativeInputSetter.call(element, value);
+    } else {
+      element.value = value;
+    }
+
+    element.dispatchEvent(new Event('keydown', { bubbles: true }));
+    element.dispatchEvent(new Event('input',   { bubbles: true }));
+    element.dispatchEvent(new Event('change',  { bubbles: true }));
+    element.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
+      bubbles: true, cancelable: true,
+    }));
+    element.dispatchEvent(new KeyboardEvent('keyup', {
+      key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
+      bubbles: true,
+    }));
+
+    element.blur();
+    element.dispatchEvent(new Event('blur', { bubbles: true }));
+
+    return true;
+  } catch (err) {
+    console.error('[MediQaz] Ошибка set1CValue:', err, element);
+    return false;
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// ПОДСВЕТКА ЗАПОЛНЕННОГО ПОЛЯ
+// ════════════════════════════════════════════════════════════
+
 function highlightField(el) {
-  const originalBorder    = el.style.border;
-  const originalBoxShadow = el.style.boxShadow;
+  const originalBorder     = el.style.border;
+  const originalBoxShadow  = el.style.boxShadow;
   const originalTransition = el.style.transition;
 
   el.style.transition = 'border 0.3s, box-shadow 0.3s';
@@ -371,112 +318,113 @@ function highlightField(el) {
 }
 
 // ════════════════════════════════════════════════════════════
-// ОСНОВНАЯ ФУНКЦИЯ ЗАПОЛНЕНИЯ
+// ФОРМИРОВАНИЕ ТЕКСТА "СОДЕРЖАНИЕ"
 // ════════════════════════════════════════════════════════════
 
-async function fillMISForm(medCard) {
-  showOverlay('⏳ Сканирую поля МИС...', 'info');
+function buildContentText(medCard) {
+  const SECTIONS = [
+    { key: 'жалобы',      label: 'Жалобы',      fallback: 'Жалоб нет' },
+    { key: 'анамнез',     label: 'Анамнез',     fallback: 'Анамнез не указан' },
+    { key: 'объективно',  label: 'Объективно',  fallback: 'Объективные данные не указаны' },
+    { key: 'диагноз',     label: 'Диагноз',     fallback: 'Диагноз не установлен', withMkb: true },
+    { key: 'рекомендации',label: 'Рекомендации',fallback: 'Рекомендации не указаны' },
+    { key: 'назначения',  label: 'Назначения',  fallback: 'Назначения не указаны' },
+  ];
 
-  // 1. Сканируем DOM
-  const fields = scanFormFields();
+  const lines = [];
 
-  if (fields.length === 0) {
-    showOverlay('⚠️ Не найдено полей для заполнения. Откройте форму МИС.', 'error');
-    return { filled: 0, total: 0, message: 'Нет полей' };
-  }
+  for (const section of SECTIONS) {
+    const data = medCard[section.key];
+    const text = data?.текст;
+    const isEmpty = !text || text.trim() === '' || text === 'Не указано в ходе приёма';
+    const displayText = isEmpty ? section.fallback : text.trim();
 
-  // 2. Определяем какие секции есть в медкарте
-  const medCardKeys = Object.keys(medCard).filter(k => medCard[k]?.текст);
-  if (medCardKeys.length === 0) {
-    showOverlay('⚠️ Медкарта пуста. Сначала сгенерируйте медкарту.', 'error');
-    return { filled: 0, total: 0, message: 'Пустая медкарта' };
-  }
+    let line = `${section.label}: ${displayText}`;
 
-  // 3. Получаем маппинг (AI или эвристика, с кэшем)
-  showOverlay('🧠 AI определяет поля формы...', 'info');
-  let mapping;
-  try {
-    mapping = await getFieldMapping(fields, medCardKeys);
-  } catch (err) {
-    console.error('[MediQaz] Ошибка маппинга:', err);
-    showOverlay(`❌ Ошибка маппинга: ${err.message}`, 'error');
-    return { filled: 0, total: 0, message: err.message };
-  }
-
-  if (!mapping || Object.keys(mapping).length === 0) {
-    showOverlay('⚠️ Не удалось определить поля формы. Попробуйте на другой странице МИС.', 'error');
-    return { filled: 0, total: 0, message: 'Маппинг пуст' };
-  }
-
-  // 4. Заполняем поля
-  showOverlay('✍️ Заполняю поля...', 'info');
-  let filled = 0;
-  let failed = 0;
-  const total = Object.keys(mapping).length;
-
-  for (const [fieldIdx, sectionKey] of Object.entries(mapping)) {
-    const field = fields[parseInt(fieldIdx)];
-    if (!field) continue;
-
-    const section = medCard[sectionKey];
-    if (!section?.текст || section.текст === 'Не указано в ходе приёма') continue;
-
-    // Формируем значение
-    let value = section.текст;
-    if (section.мкб10) value += `\nМКБ-10: ${section.мкб10}`;
-
-    // Находим элемент по селектору
-    const el = document.querySelector(field.selector);
-    if (!el) {
-      console.warn(`[MediQaz] Элемент не найден: ${field.selector}`);
-      failed++;
-      continue;
+    if (section.withMkb && data?.мкб10 && !isEmpty) {
+      line += `\nМКБ-10: ${data.мкб10}`;
     }
 
-    // Задержка между полями (чтобы React успевал обработать)
-    await new Promise(r => setTimeout(r, 150));
-
-    const success = setFieldValue(el, value);
-    if (success) {
-      filled++;
-      highlightField(el);
-    } else {
-      failed++;
-    }
+    lines.push(line);
   }
 
-  // 5. Показываем результат
-  if (filled > 0) {
-    showOverlay(`✅ Заполнено ${filled}/${total} полей`, 'success', 6000);
-  } else {
-    showOverlay(`⚠️ Не удалось заполнить поля (${failed} ошибок)`, 'error', 6000);
-  }
-
-  return { filled, total, failed, message: `Заполнено ${filled}/${total}` };
+  return lines.join('\n\n');
 }
 
 // ════════════════════════════════════════════════════════════
-// OVERLAY УВЕДОМЛЕНИЕ
+// ОСНОВНАЯ ФУНКЦИЯ ЗАПОЛНЕНИЯ — СНАЙПЕРСКИЙ ВВОД
+// ════════════════════════════════════════════════════════════
+
+/**
+ * fillMISForm(medCard, duration)
+ *
+ * ЛОГИКА ПОЛЯ «Прием:»:
+ * - Если Groq вернул тип_приема = "Первичный" или "Повторный" → заполняем
+ * - Если null (не упомянуто в диалоге) → молча пропускаем, total уменьшается
+ * - Никакой ошибки в UI, просто не трогаем это поле
+ */
+async function fillMISForm(medCard, duration) {
+  showOverlay('⏳ Заполняю поле «Содержание»...', 'info');
+  await delay(300);
+
+  const total   = 1;
+  let filled    = 0;
+  const skipped = [];
+
+  // ── Только «Содержание» ───────────────────────────────────
+  showOverlay('🎯 Заполняю поле «Содержание»...', 'info');
+
+  const editor = findLargestEditor();
+
+  if (editor) {
+    const fullText = buildContentText(medCard);
+    const ok = set1CValue(editor.el, fullText);
+
+    if (ok) {
+      filled++;
+      if (editor.type !== 'iframe') highlightField(editor.el);
+      console.log(`[MediQaz] ✅ Содержание заполнено (тип: ${editor.type}, площадь: ${Math.round(editor.area)}px²)`);
+    } else {
+      skipped.push('Содержание (ошибка set1CValue)');
+      console.warn('[MediQaz] ⚠️ Содержание: set1CValue вернул false');
+    }
+  } else {
+    skipped.push('Содержание (редактор не найден)');
+    console.warn('[MediQaz] ⚠️ Большой редактор «Содержание» не найден');
+  }
+
+  await delay(200);
+
+  // ── Итог ─────────────────────────────────────────────────
+  if (filled === total) {
+    showOverlay(`✅ Заполнено ${filled}/${total} полей МИС`, 'success', 7000);
+  } else if (filled > 0) {
+    const skippedList = skipped.join('; ');
+    showOverlay(`⚠️ Заполнено ${filled}/${total} полей. Пропущено: ${skippedList}`, 'error', 8000);
+  } else {
+    showOverlay(`❌ Не удалось заполнить ни одного поля. Откройте форму приёма в 1С.`, 'error', 8000);
+  }
+
+  console.log(`[MediQaz] Итог: заполнено ${filled}/${total}. Пропущено:`, skipped);
+  return { filled, total, skipped };
+}
+
+// ─── Утилита: задержка ──────────────────────────────────────
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ════════════════════════════════════════════════════════════
+// OVERLAY УВЕДОМЛЕНИЕ НА СТРАНИЦЕ 1С
 // ════════════════════════════════════════════════════════════
 
 function showOverlay(message, type = 'info', duration = 5000) {
-  // Удаляем предыдущий overlay если есть
   const existing = document.getElementById('mediqaz-overlay');
   if (existing) existing.remove();
 
-  const colors = {
-    info:    '#2563EB',
-    success: '#059669',
-    error:   '#DC2626',
-  };
+  const colors = { info: '#2563EB', success: '#059669', error: '#DC2626' };
+  const icons  = { info: '🩺', success: '✅', error: '⚠️' };
 
-  const icons = {
-    info:    '🩺',
-    success: '✅',
-    error:   '⚠️',
-  };
-
-  // Стили анимации
   if (!document.getElementById('mediqaz-styles')) {
     const style = document.createElement('style');
     style.id = 'mediqaz-styles';
@@ -500,45 +448,32 @@ function showOverlay(message, type = 'info', duration = 5000) {
   const overlay = document.createElement('div');
   overlay.id = 'mediqaz-overlay';
   overlay.style.cssText = `
-    position: fixed;
-    top: 16px;
-    right: 16px;
-    z-index: 999999;
-    background: ${colors[type] || colors.info};
-    color: white;
-    padding: 14px 18px 18px;
-    border-radius: 12px;
+    position: fixed; top: 16px; right: 16px; z-index: 999999;
+    background: ${colors[type] || colors.info}; color: white;
+    padding: 14px 18px 18px; border-radius: 12px;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    font-size: 14px;
-    font-weight: 500;
+    font-size: 14px; font-weight: 500;
     box-shadow: 0 8px 24px rgba(0,0,0,0.25);
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    max-width: 360px;
-    min-width: 200px;
+    display: flex; align-items: center; gap: 10px;
+    max-width: 380px; min-width: 200px;
     animation: mediqaz-slide-in 0.3s ease;
-    cursor: pointer;
-    overflow: hidden;
+    cursor: pointer; overflow: hidden;
   `;
 
   overlay.innerHTML = `
     <span style="font-size:18px;flex-shrink:0">${icons[type] || icons.info}</span>
     <span style="flex:1">${message}</span>
     <button id="mediqaz-overlay-close" style="
-      background: none; border: none; color: rgba(255,255,255,0.7);
-      cursor: pointer; font-size: 14px; padding: 0; margin-left: 4px; flex-shrink:0;
-    ">✕</button>
+      background:none;border:none;color:rgba(255,255,255,0.7);
+      cursor:pointer;font-size:14px;padding:0;margin-left:4px;flex-shrink:0;">✕</button>
     <div style="
-      position: absolute; bottom: 0; left: 0; height: 3px;
-      background: rgba(255,255,255,0.4); border-radius: 0 0 12px 12px;
-      animation: mediqaz-progress ${duration}ms linear forwards;
-    "></div>
+      position:absolute;bottom:0;left:0;height:3px;
+      background:rgba(255,255,255,0.4);border-radius:0 0 12px 12px;
+      animation:mediqaz-progress ${duration}ms linear forwards;"></div>
   `;
 
   document.body.appendChild(overlay);
 
-  // Закрытие
   const close = () => {
     overlay.style.animation = 'mediqaz-slide-out 0.25s ease forwards';
     setTimeout(() => overlay.remove(), 250);
